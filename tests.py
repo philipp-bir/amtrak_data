@@ -11,6 +11,10 @@ class TestParsing(unittest.TestCase):
         self.assertEqual(dw._parse_comment("Departed  41 minutes late."), [("Departed",41)])
         self.assertEqual(dw._parse_comment("Arrived:  3 minutes late.            |  Departed:  On time."),[("Arrived",3),("Departed",0)])
         self.assertEqual(dw._parse_comment("Arrived:  6 minutes early."),[("Arrived",-6)])
+        self.assertEqual(dw._parse_comment("Arrived:  2 hours, 15 minutes late.  |  Departed:  2 hours, 9 minutes late."),[("Arrived",2*60+15),("Departed",2*60+9)])
+        self.assertEqual(dw._parse_comment("Arrived:  2 hours, 22 minutes late."),[("Arrived",2*60+22)])
+        self.assertEqual(dw._parse_comment("Arrived  32 minutes late.  Estimated departure:  1 hour and 35 minutes late."),[("Arrived",32)])
+        self.assertEqual(dw._parse_comment("Departed:  52 Minutes late."),[("Departed",52)])
         
     def test_missing_v_line(self):
         dw=DatasetWriter("/dev/null","/dev/null")

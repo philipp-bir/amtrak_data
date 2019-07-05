@@ -43,12 +43,14 @@ class DatasetWriter:
     def _parse_comment(self,comment):
         ret=[]
         while len(comment)>0:
-            m=re.match(r"[^A-Za-z]*(Arrived|Departed):? ([^|]*)([oO]n time|late|early)(.*)$",comment)
+            m=re.match(r"[^A-Za-z]*(Arrived|Departed):? ([^|]*?)([oO]n time|late|early)(.*)$",comment)
             if m is not None:
                 if m.group(3)=="on time":
                     ret+=[(m.group(1),0)]
                 else:
-                    time_m=re.match(r"((\d+) hour)?\D*((\d+) min)?",m.group(2))
+                    #print(m.group(2))
+                    time_m=re.match(r"\D*((\d+) [hH]our)?\D*((\d+) [mM]in)?\D*$",m.group(2))
+                    #print(time_m.groups())
                     sign=1 if m.group(3)=="late" else -1
                     if time_m is not None:
                         hour=int(time_m.group(2) or 0)
@@ -324,22 +326,26 @@ class DatasetWriter:
                         
 #    def 
                         
-    def convert_zip(self,filename):
+    def convert_zip(self,filename,initial=False):
         self.success_train=0
         self.number_train=0
         self.success_station=0
         self.number_station=0
-        with open(self.csv_station,"a") as csv_station:
+        with open(self.csv_station,"w" if initial else "a") as csv_station:
             self.csv_station_writer=csv.DictWriter(csv_station,
                 fieldnames=["train_id","station_code","station_nr","nr_of_stations",
                     "scheduled_arrival","actual_arrival","scheduled_departure",
                     "actual_departure","arrival_delay","departure_delay","delay"])
-            with open(self.csv_train,"a") as csv_train:
+            if initial:
+                self.csv_station_writer.writeheader()
+            with open(self.csv_train,"w" if initial else "a") as csv_train:
                 self.csv_train_writer=csv.DictWriter(csv_train,
                 fieldnames=["train_id","train_name","origin_station_code",
                     "scheduled_departure","actual_departure",
                     "destination_station_code","scheduled_arrival",
                     "actual_arrival","delay"])
+                if initial:
+                    self.csv_train_writer.writeheader()
                 self._handle_zip(filename)
         print("Converted {}. Success with {} out of {} trains ({}%) and {} out of {} stations ({}%)".format(
             filename,self.success_train,self.number_train,100*self.success_train/self.number_train,
@@ -348,5 +354,7 @@ class DatasetWriter:
        
 if __name__ == '__main__':         
     dw=DatasetWriter("trains.csv","stations.csv")
+    first=True
     for i in range(2007,2018):
-        dw.convert_zip("/media/phil/DATA/trains/{}.zip".format(i))
+        dw.convert_zip("/media/phil/DATA/trains/{}.zip".format(i),initial=first)
+        first=False
