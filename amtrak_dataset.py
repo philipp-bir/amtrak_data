@@ -5,10 +5,11 @@ import datetime
 import csv
 import re
 import traceback
+import pytz
 
 class DatasetWriter:
     
-    def __init__(self,csv_train,csv_station):
+    def __init__(self,csv_train,csv_station,csv_code_timezone="stations_timezone.csv"):
         self.csv_train=csv_train
         self.csv_train_writer=None
         self.csv_station=csv_station
@@ -18,13 +19,40 @@ class DatasetWriter:
         self.number_train=0
         self.success_station=0
         self.number_station=0
+        
+        self.station_writer_fieldnames=["train_id","station_code","station_nr","nr_of_stations",
+                    "scheduled_arrival","actual_arrival","scheduled_departure",
+                    "actual_departure","arrival_delay","departure_delay","delay"]
+                    
+        self.train_writer_fieldnames=["train_id","nr_of_stations","origin_station_code",
+                    "scheduled_departure","actual_departure",
+                    "destination_station_code","scheduled_arrival",
+                    "actual_arrival","delay"]
+        
+        self.code_to_timezone={}
+        timezones={
+        "EST": pytz.timezone("America/New_York"),
+        "CST": pytz.timezone("America/Chicago"),
+        "MST": pytz.timezone("America/Denver"),
+        "PST": pytz.timezone("America/Los_Angeles"),
+        "MST/Arizona": pytz.timezone("America/Phoenix"),
+        }
+        with open(csv_code_timezone) as csv_code_tz:
+            code_reader=csv.DictReader(csv_code_tz)
+            for row in code_reader:
+                tz=row["timezone"]
+                if tz in timezones:
+                    self.code_to_timezone[row["code"]]=timezones[tz]
+        #print(self.code_to_timezone)
 
         
-    def _parse_time(self,start_date,time_str,day_offset):
+    def _parse_time(self,start_date,time_str,day_offset,timezone=None):
         try:
             time1=datetime.datetime.strptime((time_str+"M").rjust(6,"0"),"%I%M%p")
             diff=time1-datetime.datetime(1900,1,1)
-            return start_date+diff+datetime.timedelta(days=day_offset-1)
+            if timezone is not None:
+                return timezone.localize(start_date+diff+datetime.timedelta(days=day_offset-1))
+            return (start_date+diff+datetime.timedelta(days=day_offset-1))
         except ValueError as ve:
             #print(self.current_fn)
             #print(ve)
@@ -70,6 +98,10 @@ class DatasetWriter:
             #print(file_name)
             self.current_fn=file_name
             text=txt_file.read().decode()
+            if len(text)==0:
+                print("empty file")
+                print(file_name)
+                return
             if text[:len(text)//4].strip()==text[len(text)//2:][:len(text)//4].strip():
                 #in rare occasions the file is containing an additional copy of the data
                 text=text[:len(text)//2]
@@ -87,11 +119,11 @@ class DatasetWriter:
             first=lines.pop(0)
             #if first in lines:
                 
-            train_name=first.replace("*","").strip()  #this is unreliable
+            #train_name=first.replace("*","").strip()  #this is unreliable
             
             train_data={"train_id":train_id}#,"train_name":train_name}
             station_data={"train_id":train_id,}
-            station_set=set()
+            #station_set=set()
             #print(train_data)
             indices=None
             start_idx=0
@@ -99,6 +131,12 @@ class DatasetWriter:
             repeat_idx=0
             #count_success=0
             #count_stations=0
+            
+            first_station_entry=True
+            all_station_data=[]
+            station_count=0
+            last_valid_timezone=None
+            
             for idx,line in enumerate(lines):
                 if line.strip()=="CD":
                     continue
@@ -118,14 +156,27 @@ class DatasetWriter:
                     indices=[]
                     last=0
                     
-                    if not "V" in line:
-                        print("No 'V'-line, add one")
-                        v_line="V V    V  V     V  V     V     V     V"
-                        start_idx=idx
-                    else:    
-                        start_idx=idx+1
-                        v_line=line.replace("*","V")
-                    nr_stations=len(lines)-start_idx
+                    v_line_expected="V V    V  V     V  V     V     V     V"
+                    v_line=line.replace("*","V").strip()
+                    start_idx=idx+1
+                    if v_line!=v_line_expected:
+                        #unexpected 'V-line', we only accept it if it is just 'V' and ' '
+                        m=re.match(r"^[ V]+$",v_line)
+                        if m is None:
+                            print("missing 'V-line', add one")
+                            #print(line)
+                            #print(v_line)
+                            v_line=v_line_expected
+                            start_idx=idx #this is so we start parsing this line as the first station
+                    
+                    #if (not "V" in line) or (len(set(line))>4):
+                    #    print("No 'V'-line, add one")
+                    #    v_line=
+                    #    start_idx=idx
+                    #else:    
+                    #    start_idx=idx+1
+                    #    v_line=line.replace("*","V")
+                    #nr_stations=len(lines)-start_idx
                     while True:
                         last=v_line.find("V",last+1)
                         if last>=0:
@@ -134,7 +185,7 @@ class DatasetWriter:
                             break
                     indices+=[-1]
                 if indices is not None and idx>=start_idx:
-                    self.number_station+=1
+                    
                     try:
                         last=0
                         collect=[]
@@ -159,6 +210,33 @@ class DatasetWriter:
                             collect[i]=collect[i].replace("-","")
                         #print(sched_arr_str)
                         
+                        station_code=collect[header["station_code"]]
+                        #if station_code in station_set:
+                        #    print("station already added.")
+                        #    print(line)
+                        #    print(file_name)
+                        #    return
+                            
+                        if (len(station_code)!=3) or (re.match(r"[A-Z]{3}",station_code) is None):
+                            #cannot identify a station code, means most likely a bad line (often a comment or an empty line)
+                            #print(station_code)
+                            continue
+                            
+                        if station_code in self.code_to_timezone:
+                            tz=self.code_to_timezone[station_code]
+                            if last_valid_timezone is None:
+                                # this is the first time we have a timezone
+                                # use it for all prior entries
+                                # 
+                                localize_or_none=lambda d:tz.localize(d) if d is not None else None
+                                for s in all_station_data:
+                                    for e in ["scheduled_arrival","actual_arrival","scheduled_departure","actual_departure"]:
+                                        s[e]=localize_or_none(s[e])
+                            last_valid_timezone=tz
+                        self.number_station+=1
+
+                        station_count+=1
+                        
                         sched_dep_day=0
                         sched_arr_day=0
                         try:
@@ -173,14 +251,14 @@ class DatasetWriter:
                         sched_arr_str=collect[header["scheduled_arrival_time"]]
                         if sched_arr_str!="*":
                             scheduled_arrival=self._parse_time(start_date,sched_arr_str,
-                                sched_arr_day)
+                                sched_arr_day,last_valid_timezone)
                         sched_dep_str=collect[header["scheduled_departure_time"]]
                         if sched_dep_str!="*":
                             scheduled_departure=self._parse_time(start_date,sched_dep_str,
-                                sched_dep_day)
+                                sched_dep_day,last_valid_timezone)
                         act_arr_str=collect[header["actual_arrival_time"]]
                         if len(act_arr_str)>1:
-                            actual_arrival=self._parse_time(start_date,act_arr_str,sched_arr_day or sched_dep_day)
+                            actual_arrival=self._parse_time(start_date,act_arr_str,sched_arr_day or sched_dep_day,last_valid_timezone)
                             if scheduled_arrival is not None and actual_arrival is not None:
                                 #arr_delay=(actual_arrival-scheduled_arrival).total_seconds()
                                 actual_arrival+=self._delay_based_adj((actual_arrival-scheduled_arrival).total_seconds())
@@ -189,23 +267,18 @@ class DatasetWriter:
                         act_dep_str=collect[header["actual_departure_time"]]
                         #print(act_dep_str)
                         if len(act_dep_str)>1:
-                            actual_departure=self._parse_time(start_date,act_dep_str,sched_dep_day or sched_arr_day)
+                            actual_departure=self._parse_time(start_date,act_dep_str,sched_dep_day or sched_arr_day,last_valid_timezone)
                             if scheduled_departure is not None and actual_departure is not None:
                                 actual_departure+=self._delay_based_adj((actual_departure-scheduled_departure).total_seconds())
                                 dep_delay_min=int((actual_departure-scheduled_departure).total_seconds())//60
-                        station_code=collect[header["station_code"]]
-                        if station_code in station_set:
-                            print("station already added.")
-                            print(line)
-                            print(file_name)
-                            return
-                        station_data["station_code"]=collect[header["station_code"]]
+                        
+                        station_data["station_code"]=station_code
                         station_data["scheduled_arrival"]=scheduled_arrival
                         station_data["actual_arrival"]=actual_arrival
                         station_data["scheduled_departure"]=scheduled_departure
                         station_data["actual_departure"]=actual_departure
-                        station_data["nr_of_stations"]=nr_stations
-                        station_data["station_nr"]=idx-start_idx+1
+                        #station_data["nr_of_stations"]=nr_stations
+                        station_data["station_nr"]=station_count
                         station_data["departure_delay"]=None
                         station_data["arrival_delay"]=None
                         
@@ -234,42 +307,19 @@ class DatasetWriter:
                         station_data["delay"]=station_data["arrival_delay"]
                         if station_data["delay"] is None:
                             station_data["delay"]=station_data["departure_delay"]
-                        # ~ if aod is not None:
-                            # ~ if aod[0]=="D":
-                                # ~ d=dep_delay_min
-                            # ~ else:
-                                # ~ d=arr_delay_min
-                            # ~ if d is not None and abs(d-delay)==24*60:
-                                # ~ sign=(d-delay)//abs(d-delay)
-                                # ~ #one full day off, adjust accordingly
-                                # ~ if station_data["actual_arrival"] is not None:
-                                   # ~ station_data["actual_arrival"]+=datetime.timedelta(days=-sign)
-                                   # ~ arr_delay_min=int((station_data["actual_arrival"]-scheduled_arrival).total_seconds())//60
-                                # ~ if station_data["actual_departure"] is not None:
-                                   # ~ station_data["actual_departure"]+=datetime.timedelta(days=-sign)
-                                   # ~ dep_delay_min=int((station_data["actual_departure"]-scheduled_departure).total_seconds())//60
-                                # ~ #print("adjusted")
-                                # ~ ##print("before = {}, now= {}, {}.".format(d-delay,(arr_delay_min or 0)-delay,(dep_delay_min or 0)-delay))
-                                # ~ #print(file_name)
-                                # ~ #print(line)
-                            # ~ station_data["delay"]=delay
-                        # ~ elif arr_delay_min is not None:
-                            # ~ station_data["delay"]=arr_delay_min
-                        # ~ elif dep_delay_min is not None:
-                            # ~ station_data["delay"]=dep_delay_min
-                        # ~ else:
-                            # ~ station_data["delay"]=None
 
-                        if idx==start_idx:
-                            train_data["origin_station_code"]=station_data["station_code"]
-                            train_data["scheduled_departure"]=station_data["scheduled_departure"]
-                            train_data["actual_departure"]=station_data["actual_departure"]
-                        elif idx+1==len(lines):
-                            train_data["destination_station_code"]=station_data["station_code"]
-                            train_data["scheduled_arrival"]=station_data["scheduled_arrival"]
-                            train_data["actual_arrival"]=station_data["actual_arrival"]
-                            train_data["delay"]=station_data["delay"]
-                        self.csv_station_writer.writerow(station_data)
+                        #if first_station_entry:
+                        ##    train_data["origin_station_code"]=station_data["station_code"]
+                        #    train_data["scheduled_departure"]=station_data["scheduled_departure"]
+                        #    train_data["actual_departure"]=station_data["actual_departure"]
+                        #    first_station_entry=False
+                        #elif idx+1==len(lines):
+                        #    train_data["destination_station_code"]=station_data["station_code"]
+                        #    train_data["scheduled_arrival"]=station_data["scheduled_arrival"]
+                        #    train_data["actual_arrival"]=station_data["actual_arrival"]
+                        #    train_data["delay"]=station_data["delay"]
+                        #self.csv_station_writer.writerow(station_data)
+                        all_station_data+=[dict(station_data)]
                         self.success_station+=1
                     except ValueError as ve:
                         print(file_name)
@@ -286,10 +336,29 @@ class DatasetWriter:
                         print(line)
                         print(traceback.format_exc())
                     #print(collect)
-            #print(train_data)
-            self.csv_train_writer.writerow(train_data)
+            
+            #done with this train, write data
+            
+            
+            #print(all_station_data)
             self.success_train+=1
-            #exit()
+            for station_data in all_station_data:
+                station_data["nr_of_stations"]=station_count #now we know exactly how many stations
+                self.csv_station_writer.writerow(station_data)
+                
+            #Gather the most relevant station information for the train entry
+            first_station_data=all_station_data[0]
+            last_station_data=all_station_data[-1]
+            train_data["origin_station_code"]=first_station_data["station_code"]
+            train_data["scheduled_departure"]=first_station_data["scheduled_departure"]
+            train_data["actual_departure"]=first_station_data["actual_departure"]
+            train_data["destination_station_code"]=last_station_data["station_code"]
+            train_data["scheduled_arrival"]=last_station_data["scheduled_arrival"]
+            train_data["actual_arrival"]=last_station_data["actual_arrival"]
+            train_data["delay"]=last_station_data["delay"]
+            train_data["nr_of_stations"]=station_count
+            self.csv_train_writer.writerow(train_data)
+            
         except ValueError as ve:
             print(file_name)
             print(line)
@@ -332,22 +401,15 @@ class DatasetWriter:
         self.success_station=0
         self.number_station=0
         with open(self.csv_station,"w" if initial else "a") as csv_station:
-            self.csv_station_writer=csv.DictWriter(csv_station,
-                fieldnames=["train_id","station_code","station_nr","nr_of_stations",
-                    "scheduled_arrival","actual_arrival","scheduled_departure",
-                    "actual_departure","arrival_delay","departure_delay","delay"])
+            self.csv_station_writer=csv.DictWriter(csv_station, self.station_writer_fieldnames)
             if initial:
                 self.csv_station_writer.writeheader()
             with open(self.csv_train,"w" if initial else "a") as csv_train:
-                self.csv_train_writer=csv.DictWriter(csv_train,
-                fieldnames=["train_id","train_name","origin_station_code",
-                    "scheduled_departure","actual_departure",
-                    "destination_station_code","scheduled_arrival",
-                    "actual_arrival","delay"])
+                self.csv_train_writer=csv.DictWriter(csv_train, self.train_writer_fieldnames)
                 if initial:
                     self.csv_train_writer.writeheader()
                 self._handle_zip(filename)
-        print("Converted {}. Success with {} out of {} trains ({}%) and {} out of {} stations ({}%)".format(
+        print("Converted '{}'. Success with {} out of {} trains ({}%) and {} out of {} stations ({}%)".format(
             filename,self.success_train,self.number_train,100*self.success_train/self.number_train,
             self.success_station,self.number_station,100*self.success_station/self.number_station))
         #print(self.delay_off)
